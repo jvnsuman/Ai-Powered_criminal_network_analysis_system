@@ -1,0 +1,21 @@
+# Core pipeline
+spacy>=3.7
+transformers>=4.40         
+networkx>=3.2
+rapidfuzz>=3.6
+scikit-learn>=1.4
+
+# Data generation
+faker>=24.0
+
+# API (uncomment whichever is chosen)
+flask>=3.0
+fastapi>=0.110
+uvicorn>=0.29
+
+# Storage (uncomment whichever is chosen)
+psycopg2-binary>=2.9        # PostgreSQL
+# (sqlite3 is stdlib — no install needed)
+
+# Dev/testing
+pytest>=8.0
