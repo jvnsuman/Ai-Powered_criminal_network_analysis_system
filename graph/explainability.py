@@ -3,29 +3,42 @@ graph/explainability.py
 
 Evidence-trail layer — makes every flagged node/edge traceable back to
 the source document(s) that justify it. This is what turns a "risk
-score" into something court-usable (per Judge Q&A Q2's "strong answer":
-this is decision support, not decision-making — the investigator makes
-the final call, with the evidence in front of them).
+score" into something court-usable: decision support, not decision-
+making — the investigator makes the final call, with the evidence in
+front of them.
 
-Status: [TODO] — 0% as of Sep slice, this is Dec P1 scope.
+Distinct from graph.build.get_evidence_trail(graph, node_id), which
+reads attributes off one already-built graph object. This module is a
+system-wide, ID-keyed index that survives independently of any
+specific graph instance — the same entity_id can be looked up here
+regardless of which graph build it appeared in.
+
+Status: in-memory reference store implemented (same pattern as
+schema/user.py's stores) — nothing in the pipeline calls link_evidence
+automatically yet; it needs to be wired into extraction/resolution/
+graph-build time to populate on its own rather than requiring a
+separate manual call.
 """
 
 from schema.entities import SourceDocument
 
+_EVIDENCE_STORE: dict[str, list[SourceDocument]] = {}
+
 
 def link_evidence(node_or_edge_id: str, source_document: SourceDocument) -> None:
-    """[TODO] Record that a graph node or edge is backed by a specific
-    source document. Should be called at extraction/resolution/graph-
-    build time, not bolted on after — every entity and relationship
-    already carries a source_document_id (schema/entities.py), this
-    function is what turns that raw reference into a queryable trail.
+    """Record that a graph node or edge is backed by a specific source
+    document. Idempotent per (id, document.id) pair — linking the same
+    document to the same node twice does not duplicate it.
     """
-    raise NotImplementedError
+    existing = _EVIDENCE_STORE.setdefault(node_or_edge_id, [])
+    if not any(doc.id == source_document.id for doc in existing):
+        existing.append(source_document)
 
 
 def get_evidence_trail(entity_id: str) -> list[SourceDocument]:
-    """[TODO] Retrieve all supporting documents for a flagged entity or
-    pattern. This is what powers the dashboard's evidence panel
-    (project notes Section 12) — clicking a node shows this output.
+    """Retrieve every source document linked to a flagged entity or
+    pattern via link_evidence. Returns an empty list (not an error) if
+    nothing has been linked yet — powers the dashboard's EvidencePanel
+    component via api/routes/evidence.py.
     """
-    raise NotImplementedError
+    return list(_EVIDENCE_STORE.get(entity_id, []))

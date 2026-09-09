@@ -1,0 +1,41 @@
+# Local/demo stack: PostgreSQL + the FastAPI backend + the dashboard
+# (served via nginx, which also reverse-proxies /api to the backend —
+# see dashboard/nginx.conf). Run with: docker compose up --build
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=cna_user
+      - POSTGRES_PASSWORD=cna_password
+      - POSTGRES_DB=cna
+    volumes:
+      - cna-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    # api waits for this healthcheck before starting, so it never
+    # races Postgres's own startup time.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cna_user -d cna"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://cna_user:cna_password@db:5432/cna
+    depends_on:
+      db:
+        condition: service_healthy
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "4173:4173"
+    depends_on:
+      - api
+
+volumes:
+  cna-postgres-data:

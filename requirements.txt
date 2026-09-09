@@ -1,21 +1,71 @@
-# Core pipeline
-spacy>=3.7
-transformers>=4.40         
-networkx>=3.2
-rapidfuzz>=3.6
-scikit-learn>=1.4
+# Requirements grouped by pipeline stage (see docs/ARCHITECTURE.md).
+# Sections marked "currently used" reflect what's actually imported in
+# the codebase today; "planned" sections are needed once the
+# corresponding module is built out.
+#
+# All licenses checked for Apache 2.0 compatibility. Neo4j is
+# deliberately EXCLUDED — GPLv3, incompatible with the rest of this
+# permissive-licensed stack. NetworkX is the confirmed graph backend.
 
-# Data generation
-faker>=24.0
+# -----------------------------------------------------------------------
+# Stage 2 — NLP entity extraction (nlp/extraction.py)
+# spacy (+ en_core_web_sm model, downloaded separately) is the primary
+# NER engine for PERSON/LOCATION/ORGANIZATION.
+# -----------------------------------------------------------------------
+spacy>=3.7,<3.8
+# After installing, run: python -m spacy download en_core_web_sm
 
-# API (uncomment whichever is chosen)
-flask>=3.0
+# -----------------------------------------------------------------------
+# Stage 3 — Entity resolution (nlp/resolution.py, nlp/confidence.py)
+# Currently fuzzy string matching only (RapidFuzz). scikit-learn is
+# planned for multi-signal confidence scoring, not yet used.
+# -----------------------------------------------------------------------
+rapidfuzz>=3.9,<4.0
+scikit-learn>=1.5,<2.0
+
+# -----------------------------------------------------------------------
+# Stage 3.5 — Relation classification & risk flagging
+# (nlp/relation_classification.py), and OPTIONALLY extraction.py's
+# multilingual NER pass (nlp/extraction.py's _get_hf_pipeline).
+# transformers/torch stay commented out since they're heavy: uncomment
+# to actually run relation_classification.py (it has concrete, already-
+# chosen models: facebook/bart-large-mnli, unitary/toxic-bert) or
+# extraction.py's HF pass (which still needs a real IndicNER/
+# multilingual checkpoint chosen and set via HF_NER_MODEL — see that
+# module's _get_hf_pipeline docstring; no default is hardcoded).
+# -----------------------------------------------------------------------
+transformers>=4.40,<5.0
+torch>=2.3,<3.0
+
+# -----------------------------------------------------------------------
+# Stage 4/5 — Graph construction & analytics (graph/build.py, graph/analytics.py)
+# NetworkX confirmed as backend (BSD-3-Clause; see license audit above).
+# matplotlib is optional, only needed for graph.build.render_graph's
+# static PNG export — not required for the dashboard's interactive view.
+# -----------------------------------------------------------------------
+networkx>=3.3,<4.0
+matplotlib>=3.8,<4.0
+
+# -----------------------------------------------------------------------
+# Synthetic data generation (data/)
+# Faker has no stable major-version ceiling worth pinning to (frequent
+# releases, backward-compatible) — floor only.
+# -----------------------------------------------------------------------
+faker>=25.0
+
+# -----------------------------------------------------------------------
+# API layer (api/, db/) — implemented: FastAPI + PostgreSQL (SQLAlchemy).
+# psycopg2-binary is the PostgreSQL driver; db/connection.py also
+# supports sqlite:// URLs (used by the test suite) via the same engine.
+# -----------------------------------------------------------------------
 fastapi>=0.110
 uvicorn>=0.29
+pydantic-settings>=2.4
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
 
-# Storage (uncomment whichever is chosen)
-psycopg2-binary>=2.9        # PostgreSQL
-# (sqlite3 is stdlib — no install needed)
-
-# Dev/testing
-pytest>=8.0
+# -----------------------------------------------------------------------
+# Dev / testing (all stages)
+# -----------------------------------------------------------------------
+pytest>=8.2
+httpx>=0.27
