@@ -16,6 +16,12 @@
  * outward by degree, rather than a force-directed layout that could
  * place the most important entity anywhere.
  *
+ * COLOR NOTE: this component was restyled for the light-theme
+ * sidebar-nav dashboard (SIH26189_Project_Notes.md Section 12/17).
+ * Node/edge colors are still the same semantic entity-type mapping as
+ * before, just re-picked to sit on a light background (see
+ * ENTITY_COLORS) — no other logic changed from the original build.
+ *
  * graphData shape: { nodes: [{id, label, entity_type}],
  *                     edges: [{id, source, target, relationship_type, weight}] }
  */
@@ -30,12 +36,12 @@ const COLLAPSE_THRESHOLD = 4
 const VISIBLE_NEIGHBORS_WHEN_COLLAPSED = 2
 
 const ENTITY_COLORS = {
-  person: '#38bdf8',
-  location: '#f5b942',
-  vehicle: '#a78bfa',
-  phone: '#2dd4bf',
-  organization: '#f2637a',
-  event: '#9aa3b8',
+  person: '#7c6ee8',
+  location: '#0ea5a0',
+  vehicle: '#f59e0b',
+  phone: '#2563eb',
+  organization: '#ef4444',
+  event: '#94a3b8',
 }
 
 const LEGEND_ITEMS = [
@@ -75,18 +81,21 @@ function buildStylesheet() {
     {
       selector: 'node',
       style: {
-        'background-color': (ele) => ENTITY_COLORS[ele.data('entity_type')] || '#999',
+        'background-color': (ele) => ENTITY_COLORS[ele.data('entity_type')] || '#94a3b8',
         label: 'data(label)',
-        color: '#eef1f7',
+        color: '#1e293b',
         'font-family': 'Inter, sans-serif',
         'font-size': 11,
-        'font-weight': 500,
+        'font-weight': 600,
         'text-valign': 'bottom',
         'text-margin-y': 8,
-        width: 36,
-        height: 36,
+        width: 34,
+        height: 34,
         'border-width': 3,
-        'border-color': '#0b0d12',
+        'border-color': '#ffffff',
+        'text-background-color': '#ffffff',
+        'text-background-opacity': 0.85,
+        'text-background-padding': '2px',
         'transition-property': 'border-width, border-color, opacity',
         'transition-duration': 120,
       },
@@ -96,71 +105,68 @@ function buildStylesheet() {
       selector: 'node.expander',
       style: {
         shape: 'round-rectangle',
-        'background-color': '#232838',
+        'background-color': '#eef1f7',
         width: 'label',
         height: 26,
         padding: '7px',
         'font-size': 10,
-        'font-weight': 500,
-        color: '#8b93a7',
+        'font-weight': 600,
+        color: '#64748b',
         'border-width': 1,
-        'border-color': '#3a4258',
+        'border-color': '#d7dce6',
         'border-style': 'dashed',
       },
     },
     {
       // Applied to everything that doesn't match the current search query.
       selector: 'node.dimmed',
-      style: { opacity: 0.12 },
+      style: { opacity: 0.15 },
     },
     {
       // Applied to nodes that do match the current search query.
       selector: 'node.highlighted',
-      style: { 'border-width': 3, 'border-color': '#f5b942' },
+      style: { 'border-width': 3, 'border-color': '#f59e0b' },
     },
     {
       // Applied to the "main suspect" node — the highest-degree PERSON
-      // entity, centered by the concentric layout below. A lightweight,
-      // client-side stand-in for graph.build.highlight_influencer until
-      // that's exposed over the API: computed from the already-loaded
-      // graph, not a new backend call.
+      // entity, centered by the concentric layout below.
       selector: 'node.main-suspect',
       style: {
         'border-width': 3,
-        'border-color': '#2dd4bf',
+        'border-color': '#ef4444',
         'border-style': 'double',
-        width: 46,
-        height: 46,
+        width: 44,
+        height: 44,
         'z-index': 10,
       },
     },
     {
       // Subtle "lift" on hover — reinforces that nodes are clickable.
       selector: 'node.node-hover',
-      style: { width: 42, height: 42 },
+      style: { width: 40, height: 40 },
     },
     {
       selector: 'edge',
       style: {
-        width: (ele) => 1.4 + Math.min(Number(ele.data('weight')) || 1, 6),
-        'line-color': '#3a4258',
-        'target-arrow-color': '#3a4258',
+        width: (ele) => 1.2 + Math.min(Number(ele.data('weight')) || 1, 6),
+        'line-color': '#c7ceda',
+        'target-arrow-color': '#c7ceda',
         'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.9,
+        'arrow-scale': 0.85,
         'curve-style': 'bezier',
-        opacity: 0.75,
+        opacity: 0.9,
         'transition-property': 'opacity',
         'transition-duration': 120,
       },
     },
     {
       selector: 'edge.dimmed',
-      style: { opacity: 0.04 },
+      style: { opacity: 0.06 },
     },
   ]
 }
 
-export default function GraphCanvas({ graphData, onNodeSelect, searchQuery }) {
+export default function GraphCanvas({ graphData, onNodeSelect, searchQuery, typeFilter }) {
   const containerRef = useRef(null)
   const cyRef = useRef(null)
   // Tracks collapsed hubs: expanderId -> {hubId, hiddenNodeIds, hiddenEdgeIds}
@@ -316,26 +322,32 @@ export default function GraphCanvas({ graphData, onNodeSelect, searchQuery }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphData])
 
-  // Re-apply the dim/highlight classes whenever the search query changes.
+  // Re-apply the dim/highlight classes whenever the search query or the
+  // entity-type filter changes. Nodes are dimmed rather than removed so
+  // Cytoscape never has an edge pointing at a missing node.
   useEffect(() => {
     const cy = cyRef.current
     if (!cy) return
     const query = (searchQuery || '').trim().toLowerCase()
+    const typeActive = Boolean(typeFilter) && typeFilter !== 'all'
 
     cy.batch(() => {
-      if (!query) {
+      if (!query && !typeActive) {
         cy.elements().removeClass('dimmed highlighted')
         return
       }
-      const matches = cy.nodes().filter(
-        (n) => !n.hasClass('expander') && (n.data('label') || '').toLowerCase().includes(query)
-      )
+      const matches = cy.nodes().filter((n) => {
+        if (n.hasClass('expander')) return false
+        const matchesQuery = !query || (n.data('label') || '').toLowerCase().includes(query)
+        const matchesType = !typeActive || n.data('entity_type') === typeFilter
+        return matchesQuery && matchesType
+      })
       cy.elements().addClass('dimmed').removeClass('highlighted')
-      matches.removeClass('dimmed').addClass('highlighted')
+      matches.removeClass('dimmed')
+      if (query) matches.addClass('highlighted')
       matches.connectedEdges().removeClass('dimmed')
-      matches.neighborhood('node').removeClass('dimmed')
     })
-  }, [searchQuery])
+  }, [searchQuery, typeFilter])
 
   function zoomBy(factor) {
     const cy = cyRef.current

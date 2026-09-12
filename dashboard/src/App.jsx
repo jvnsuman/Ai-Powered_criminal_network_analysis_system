@@ -1,36 +1,43 @@
 /**
  * dashboard/src/App.jsx
  *
- * Top-level layout: login gate, case selector, and the four main
- * dashboard components (SearchBar, CaseSummaryCards, GraphCanvas,
- * EvidencePanel), plus the ingestion form.
+ * New sidebar-nav shell (see SIH26189_Project_Notes.md Section 12/17
+ * "sidebar-nav mockup direction"). Replaces the old dark-theme top-bar
+ * layout, keeping the same real data flow: login gate, case selection,
+ * api.queryCase with the sample-data fallback for the not-yet-built
+ * graph pipeline (api/routes/query.py's 501).
  *
- * Real graph data comes from api.queryCase (api/routes/query.py).
- * While graph.build is [TODO] that call reports 501, so this falls
- * back to the clearly-labeled synthetic sample graph (sampleData.js)
- * — never silently presented as real case data.
+ * Role enforcement (Section 13): Analyst is cross-case READ-ONLY. The
+ * backend already enforces this (schema.user.Role.ANALYST has no edit
+ * permission in api/routes/cases.py's assign endpoint, and analysts
+ * were never given a case-creation path). This file adds the matching
+ * UI-side constraint: the ingestion form (Data Sources page) and the
+ * "open new case" action are hidden for analyst/investigator-only
+ * actions are hidden when session.role === 'analyst', so the UI
+ * doesn't dangle affordances a backend call would just reject anyway.
  */
 
-import { AlertTriangle, Network } from 'lucide-react'
+import { AlertTriangle, Share2, ShieldAlert, ShieldCheck, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, getToken } from './api/client'
 import { SAMPLE_GRAPH } from './sampleData'
+import Sidebar from './components/Sidebar'
+import TopBar from './components/TopBar'
 import CaseSelector from './components/CaseSelector'
-import CaseSummaryCards from './components/CaseSummaryCards'
 import EvidencePanel from './components/EvidencePanel'
-import GraphCanvas from './components/GraphCanvas'
-import GraphSkeleton from './components/GraphSkeleton'
-import IngestionForm from './components/IngestionForm'
 import LoginForm from './components/LoginForm'
-import SearchBar from './components/SearchBar'
+import Dashboard from './pages/Dashboard'
+import NetworkGraph from './pages/NetworkGraph'
+import SearchInvestigate from './pages/SearchInvestigate'
+import DataSources from './pages/DataSources'
+import Reports from './pages/Reports'
+import SettingsPage from './pages/Settings'
 
-function initials(name) {
-  if (!name) return '?'
-  return name.split(' ').map((part) => part[0]).slice(0, 2).join('').toUpperCase()
-}
+const READ_ONLY_ROLES = new Set(['analyst'])
 
 export default function App() {
   const [session, setSession] = useState(null)
+  const [activePage, setActivePage] = useState('dashboard')
   const [selectedCaseId, setSelectedCaseId] = useState(null)
   const [caseData, setCaseData] = useState(null)
   const [caseLoading, setCaseLoading] = useState(false)
@@ -39,14 +46,10 @@ export default function App() {
   const [selectedEntityId, setSelectedEntityId] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Restore a session from a previously-stored token so a page reload
-  // doesn't force a fresh login.
   useEffect(() => {
     if (getToken()) setSession({ restored: true })
   }, [])
 
-  // Whenever the selected case changes, try to load its real graph;
-  // fall back to the sample graph if the pipeline isn't ready yet.
   useEffect(() => {
     if (!session || !selectedCaseId) return
     let cancelled = false
@@ -82,38 +85,109 @@ export default function App() {
 
   if (!session) {
     return (
-      <div className="app-shell app-shell-centered">
+      <div className="login-shell">
+        <div className="login-shell-hero">
+          <div className="login-shell-network-bg" aria-hidden="true" />
+          <div className="login-shell-hero-content">
+            <div className="login-shell-brand">
+              <span className="login-shell-brand-icon">
+                <ShieldCheck size={22} strokeWidth={2.3} />
+              </span>
+              <div>
+                <h1>Criminal Network Analysis</h1>
+                <p className="login-shell-tagline">Smarter Insights, Safer Communities.</p>
+              </div>
+            </div>
+            <p className="login-shell-description">
+              AI-powered platform to discover hidden connections, analyze criminal networks, and support law
+              enforcement with <strong>intelligent data-driven insights.</strong>
+            </p>
+            <div className="login-shell-features">
+              <div className="login-shell-feature">
+                <span className="login-shell-feature-icon">
+                  <Users size={18} />
+                </span>
+                Connect Entities
+              </div>
+              <div className="login-shell-feature">
+                <span className="login-shell-feature-icon">
+                  <Share2 size={18} />
+                </span>
+                Analyze Networks
+              </div>
+              <div className="login-shell-feature">
+                <span className="login-shell-feature-icon">
+                  <ShieldAlert size={18} />
+                </span>
+                Prevent Crime
+              </div>
+            </div>
+          </div>
+        </div>
         <LoginForm onLoggedIn={setSession} />
       </div>
     )
   }
 
+  const isReadOnly = READ_ONLY_ROLES.has(session.role)
+
+  function renderPage() {
+    switch (activePage) {
+      case 'dashboard':
+        return (
+          <Dashboard
+            session={session}
+            graphData={caseData}
+            caseLoading={caseLoading}
+            usingSampleData={usingSampleData}
+            selectedCaseId={selectedCaseId}
+            searchQuery={searchQuery}
+            onNodeSelect={setSelectedEntityId}
+          />
+        )
+      case 'graph':
+        return (
+          <NetworkGraph
+            graphData={caseData}
+            caseLoading={caseLoading}
+            usingSampleData={usingSampleData}
+            searchQuery={searchQuery}
+            selectedEntityId={selectedEntityId}
+            onNodeSelect={setSelectedEntityId}
+          />
+        )
+      case 'search':
+        return <SearchInvestigate graphData={caseData} onSelectEntity={setSelectedEntityId} />
+      case 'sources':
+        return isReadOnly ? (
+          <div className="page-sources">
+            <h1>Data Sources</h1>
+            <p className="page-sub">Your role (Analyst) has cross-case read-only access — data ingestion is restricted to Investigators and Admins.</p>
+          </div>
+        ) : (
+          <DataSources selectedCaseId={selectedCaseId} />
+        )
+      case 'reports':
+        return <Reports selectedCaseId={selectedCaseId} />
+      case 'settings':
+        return <SettingsPage session={session} />
+      default:
+        return null
+    }
+  }
+
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="app-header-title">
-          <div className="app-header-logo">
-            <Network size={19} strokeWidth={2.4} />
-          </div>
-          <div>
-            <h1>Criminal Network Analysis</h1>
-            <div className="app-header-subtitle">Investigator Console</div>
-          </div>
-        </div>
-        <div className="app-header-controls">
+    <div className="app-shell-v2">
+      <Sidebar activePage={activePage} onNavigate={setActivePage} />
+      <div className="app-shell-v2-main">
+        <TopBar session={session} searchQuery={searchQuery} onSearchChange={setSearchQuery} notificationCount={1} />
+
+        <div className="app-shell-v2-toolbar">
           <CaseSelector selectedCaseId={selectedCaseId} onSelectCase={setSelectedCaseId} />
-          {session.name && (
-            <div className="user-chip">
-              <span className="user-chip-avatar">{initials(session.name)}</span>
-              <div className="user-chip-text">
-                <span className="user-chip-name">{session.name}</span>
-                <span className="user-chip-role">{session.role?.replace('_', ' ')}</span>
-              </div>
-            </div>
-          )}
+          {isReadOnly && <span className="readonly-badge">Read-only access</span>}
           <button
             type="button"
-            className="logout-button"
+            className="logout-link"
             onClick={() => {
               api.logout()
               setSession(null)
@@ -124,40 +198,21 @@ export default function App() {
             Sign out
           </button>
         </div>
-      </header>
 
-      {usingSampleData && (
-        <div className="sample-data-banner">
-          <AlertTriangle size={15} />
-          Showing synthetic sample data — the live graph pipeline isn't connected yet.
-        </div>
-      )}
-      {loadError && (
-        <div className="error-banner">
-          <AlertTriangle size={15} />
-          {loadError}
-        </div>
-      )}
+        {loadError && (
+          <div className="error-banner">
+            <AlertTriangle size={15} />
+            {loadError}
+          </div>
+        )}
 
-      <CaseSummaryCards caseStats={caseData?.stats} />
+        <main className="app-shell-v2-content">{renderPage()}</main>
 
-      <div className="app-body">
-        <div className="app-main">
-          <SearchBar onSearch={setSearchQuery} />
-          {caseLoading ? (
-            <GraphSkeleton />
-          ) : (
-            <GraphCanvas
-              graphData={caseData}
-              searchQuery={searchQuery}
-              onNodeSelect={setSelectedEntityId}
-            />
-          )}
-        </div>
-        <div className="app-sidebar">
-          <EvidencePanel selectedEntityId={selectedEntityId} />
-          <IngestionForm caseId={selectedCaseId} />
-        </div>
+        {activePage === 'dashboard' && selectedEntityId && (
+          <div className="evidence-drawer">
+            <EvidencePanel selectedEntityId={selectedEntityId} />
+          </div>
+        )}
       </div>
     </div>
   )
