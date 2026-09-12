@@ -23,7 +23,7 @@ of how they're persisted.
 import hashlib
 import hmac
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -69,6 +69,7 @@ class User:
     role: Role
     password_hash: Optional[str] = None  # or an SSO token, once that integration exists
     last_login: Optional[str] = None
+    preferences: dict = field(default_factory=dict)  # Settings page toggles (dark_mode, email_alerts, auto_refresh_graph, ...) — an open key-value bag, not a fixed schema
 
 
 _HASH_ALGO = "pbkdf2_sha256"

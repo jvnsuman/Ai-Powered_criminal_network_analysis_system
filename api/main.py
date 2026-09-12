@@ -4,6 +4,11 @@ api/main.py
 FastAPI application entrypoint. Wires together auth (api/auth.py) and
 the route modules (api/routes/) into one app.
 
+Adds the alerts router (api/routes/alerts.py) for the sidebar-nav
+dashboard's Recent Alerts panel, and the reports/settings routers
+(api/routes/reports.py, api/routes/settings.py) for the Reports and
+Settings pages — everything else unchanged.
+
 Run locally with: uvicorn api.main:app --reload
 """
 
@@ -14,7 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from api import auth
-from api.routes import cases, evidence, ingestion, query
+from api.routes import alerts, cases, evidence, ingestion, query, reports
+from api.routes import settings as settings_routes
 from config import get_settings
 from db.connection import get_db, init_db
 
@@ -62,6 +68,9 @@ def create_app() -> FastAPI:
     app.include_router(ingestion.router, prefix="/ingest", tags=["ingestion"])
     app.include_router(query.router, prefix="/query", tags=["query"])
     app.include_router(evidence.router, prefix="/evidence", tags=["evidence"])
+    app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
+    app.include_router(reports.router, prefix="/reports", tags=["reports"])
+    app.include_router(settings_routes.router, prefix="/settings", tags=["settings"])
 
     return app
 

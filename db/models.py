@@ -8,12 +8,22 @@ between these ORM rows and those dataclasses; nothing outside db/
 should import from this module directly.
 """
 
+from datetime import datetime, timezone
+
 from sqlalchemy import Column, Float, ForeignKey, String, Table
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 class Base(DeclarativeBase):
     """Shared declarative base for all ORM models below."""
+
+
+def _utc_now_iso() -> str:
+    """Column default for created_at fields — a plain ISO-8601 UTC
+    timestamp string, matching the style already used for
+    UserORM.last_login and CaseORM.opened_at elsewhere in this file.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 # Many-to-many join table between cases and their assigned investigators.
@@ -52,6 +62,7 @@ class UserORM(Base):
     role = Column(String, nullable=False)  # schema.user.Role value
     password_hash = Column(String, nullable=True)
     last_login = Column(String, nullable=True)
+    preferences = Column(String, nullable=True)  # JSON-encoded dict — see schema.user.User.preferences
 
     agency = relationship("AgencyORM", back_populates="users")
     assigned_cases = relationship("CaseORM", secondary=case_investigators, back_populates="investigators")
@@ -83,6 +94,7 @@ class SourceDocumentORM(Base):
     document_type = Column(String, nullable=False)  # one of schema.entities.VALID_DOCUMENT_TYPES
     raw_text = Column(String, nullable=False)
     case_id = Column(String, ForeignKey("cases.id"), nullable=True)
+    created_at = Column(String, nullable=False, default=_utc_now_iso)  # backs db.repository.get_document_summary_for_case
 
     case = relationship("CaseORM", back_populates="documents")
     entities = relationship("EntityORM", back_populates="source_document")
@@ -120,3 +132,20 @@ class RelationshipORM(Base):
     relationship_type = Column(String, nullable=False)  # schema.entities.RelationshipType value
     source_document_id = Column(String, ForeignKey("source_documents.id"), nullable=True)
     weight = Column(Float, nullable=False, default=1.0)
+
+
+class ReportORM(Base):
+    """Table form of schema.report.Report — a generated case summary
+    (Markdown) or data export (CSV), persisted so the Reports page can
+    list and re-download past reports instead of regenerating them
+    on every visit.
+    """
+
+    __tablename__ = "reports"
+
+    id = Column(String, primary_key=True)
+    case_id = Column(String, ForeignKey("cases.id"), nullable=False)
+    title = Column(String, nullable=False)
+    format = Column(String, nullable=False)  # schema.report.VALID_REPORT_FORMATS value
+    content = Column(String, nullable=False)
+    created_at = Column(String, nullable=False, default=_utc_now_iso)

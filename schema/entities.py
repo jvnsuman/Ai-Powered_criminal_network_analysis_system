@@ -206,6 +206,7 @@ class SourceDocument:
     document_type: str  # one of VALID_DOCUMENT_TYPES
     raw_text: str
     case_id: Optional[str] = None
+    created_at: Optional[str] = None  # server-assigned at persistence time (db.models.SourceDocumentORM's default) — not required on input
 
     def __post_init__(self):
         """Validate on construction."""
@@ -226,13 +227,17 @@ class SourceDocument:
             "document_type": self.document_type,
             "raw_text": self.raw_text,
             "case_id": self.case_id,
+            "created_at": self.created_at,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "SourceDocument":
         """Build and validate a SourceDocument from a plain dict. This
         is the shape check api/routes/ingestion.py relies on before
-        accepting an uploaded document.
+        accepting an uploaded document. created_at is normally left
+        unset here (the caller is submitting a new document) and
+        assigned server-side at persistence time — accepted as an
+        optional passthrough only for round-tripping already-stored data.
         """
         try:
             return cls(
@@ -240,6 +245,7 @@ class SourceDocument:
                 document_type=data["document_type"],
                 raw_text=data["raw_text"],
                 case_id=data.get("case_id"),
+                created_at=data.get("created_at"),
             )
         except KeyError as exc:
             raise ValueError(f"SourceDocument dict missing required key: {exc}")
