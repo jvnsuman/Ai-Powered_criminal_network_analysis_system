@@ -109,10 +109,20 @@ def _get_relation_pipeline():
 
 def classify_relation(entity_a: ExtractedEntity, entity_b: ExtractedEntity,
                        source_text: str,
-                       confidence_threshold: float = 0.5) -> ClassifiedRelation:
+                       confidence_threshold: float = 0.3) -> ClassifiedRelation:
     """Classify the relationship between two extracted entities.
 
     Returns UNRELATED if no label clears confidence_threshold.
+
+    NOTE on confidence_threshold=0.3 (lowered from an original 0.5):
+    zero-shot classification across 5-6 competing relation hypotheses
+    rarely produces a top score above 0.5 even for the genuinely
+    correct label — real diagnostic runs on this project's own sample
+    data showed correct top-scoring relations clustering at 0.41-0.48,
+    which the old 0.5 cutoff silently discarded as UNRELATED on every
+    single relation. 0.3 is a starting point (comfortably above the
+    ~0.17 a uniform 6-way random guess would average), not a validated
+    cutoff — tune against labelled data before December.
 
     Raises:
         RuntimeError: if transformers/torch are not installed, or two
@@ -165,10 +175,13 @@ def classify_relation(entity_a: ExtractedEntity, entity_b: ExtractedEntity,
 
 
 def classify_all_relations(entities: list[ExtractedEntity], source_text: str,
-                            confidence_threshold: float = 0.5,
+                            confidence_threshold: float = 0.3,
                             skip_unrelated: bool = True) -> list[ClassifiedRelation]:
     """Classify relationships across every pair of entities from the
     same document. O(n^2) pipeline calls.
+
+    See classify_relation's docstring for why confidence_threshold
+    defaults to 0.3 rather than 0.5.
 
     Raises:
         RuntimeError: if transformers/torch are not installed.
