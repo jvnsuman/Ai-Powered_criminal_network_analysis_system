@@ -1,40 +1,38 @@
 """
 graph/build.py
 
-Stage 4 of the pipeline: graph construction. Consumes
-nlp.resolution.ResolvedEntity (canonical, deduplicated entities) and
-nlp.relation_classification.ClassifiedRelation (relationships between
-entities), and assembles them into one queryable graph. Everything
-downstream (centrality/influencer detection, the investigator
-dashboard) reads from the graph this module produces, not from either
-upstream module's raw output directly.
+Stage 4: graph construction. Consumes nlp.resolution.ResolvedEntity
+(canonical, deduplicated entities) and
+nlp.relation_classification.ClassifiedRelation (relationships), and
+assembles them into one queryable graph. Everything downstream
+(centrality/influencer detection, the dashboard) reads from the graph
+this module produces, not from either upstream module's raw output.
 
-Critical ID-mapping issue this module resolves (not optional plumbing
-if extending it): ClassifiedRelation's entity_a_id/entity_b_id are raw
+ID-mapping: ClassifiedRelation.entity_a_id/entity_b_id are raw
 nlp.extraction.ExtractedEntity.id values — per-MENTION IDs, one per
-occurrence in one document — NOT ResolvedEntity.id values (canonical,
-deduplicated IDs). Building the graph straight from ClassifiedRelation
-without translating IDs first would produce one graph node per raw
+occurrence in one document — NOT ResolvedEntity.id values. Building
+edges straight from mention IDs would produce one graph node per
 mention instead of per real-world entity (e.g. "Raju Kumar" and
 "Raju S." would sit as two disconnected nodes even where resolution
-correctly merged them). This module always translates through
-nlp.resolution.build_mention_to_resolved_map before adding an edge —
-see build_graph()'s implementation.
+correctly merged them). Always translate through
+nlp.resolution.build_mention_to_resolved_map before adding an edge.
 
-Library choice: NetworkX MultiDiGraph, not Graph or DiGraph. A plain
-nx.Graph silently overwrites a second edge added between the same two
-nodes (e.g. a "calls" edge between A and B, then a "transacts-with"
-edge between the same A and B, leaves only the second — the first is
-gone with no error). This project's entity schema allows exactly that:
-two entities can have more than one relationship type between them. A
-MultiDiGraph keeps every distinct edge. Direction matters too — "calls,"
-"owns," and "transacts-with" aren't symmetric (A owns B doesn't imply B
-owns A), so an undirected Graph would misrepresent the schema itself.
+Library choice: NetworkX MultiDiGraph. A plain nx.Graph silently
+overwrites a second edge added between the same two nodes (a "calls"
+edge then a "transacts-with" edge between the same pair leaves only
+the second). This schema allows two entities to have more than one
+relationship type between them, so a MultiDiGraph is required to keep
+every distinct edge. Direction matters too (A owns B doesn't imply B
+owns A), so an undirected Graph would misrepresent the schema.
 
-Status tags used throughout:
-    [DONE]         - implemented and expected to work for the demo
-    [IN PROGRESS]  - partially implemented, has a real body but needs work
-    [TODO]         - stub only, raises NotImplementedError, future scope
+Edge merging: multiple documents classifying the SAME pair as the SAME
+relation type are merged into one edge with a list of supporting
+evidence (see _merge_or_add_edge), rather than left as separate
+parallel edges — two independent documents confirming "calls" is
+stronger evidence than one, and should read that way, not as two
+unrelated low-context lines. Different relation TYPES between the same
+pair still get separate parallel edges (that's what MultiDiGraph is
+for).
 """
 
 from __future__ import annotations
@@ -58,32 +56,9 @@ from nlp.relation_classification import ClassifiedRelation, RelationType
 def build_graph(resolved_entities: list,
                  relations: list) -> "nx.MultiDiGraph":
     """Construct a NetworkX MultiDiGraph from resolved entities and
-    classified relations.
-
-    Node keys are ResolvedEntity.id (canonical IDs, never raw mention
-    IDs). Every node carries the attributes the explainability layer
-    needs to trace it back to source: entity_type, canonical_text,
-    mention_ids, and source_doc_ids.
-
-    Every edge is added via add_relation_edge (not inline here), which
-    performs the mention-ID -> resolved-ID translation described in
-    this module's docstring. RelationType.UNRELATED relations are
-    skipped.
-
-    Args:
-        resolved_entities: output of nlp.resolution.resolve_entities.
-        relations: output of
-            nlp.relation_classification.classify_all_relations (or any
-            list of ClassifiedRelation built the same way) — can span
-            multiple documents, as long as every entity_a_id/
-            entity_b_id it references is a mention_id present in
-            resolved_entities' mention_ids.
-
-    Returns:
-        A populated nx.MultiDiGraph. Nodes for every resolved entity
-        are always added, even ones with zero relations — an isolated
-        entity is still a real finding worth surfacing, not something
-        to silently drop.
+    classified relations. Node keys are ResolvedEntity.id. Nodes for
+    every resolved entity are always added, even with zero relations —
+    an isolated entity is still a real finding worth surfacing.
     """
     graph = nx.MultiDiGraph()
 
@@ -105,36 +80,66 @@ def build_graph(resolved_entities: list,
     return graph
 
 
+def _find_existing_edge_key(graph: "nx.MultiDiGraph", source: str, target: str,
+                             relation_type: str) -> Optional[int]:
+    """Return the key of an existing source->target edge with this
+    relation_type, or None if no such edge exists yet.
+    """
+    if not graph.has_edge(source, target):
+        return None
+    for key, data in graph[source][target].items():
+        if data.get("relation_type") == relation_type:
+            return key
+    return None
+
+
+def _merge_or_add_edge(graph: "nx.MultiDiGraph", source: str, target: str,
+                        relation: ClassifiedRelation) -> int:
+    """Add a new edge, or merge into an existing same-type edge between
+    the same pair. Every edge (new or merged) carries an "evidence"
+    list of {confidence, source_doc_id, source_text} — one entry per
+    document that supports it — plus a top-level "confidence" equal to
+    the max across all evidence, so existing readers of "confidence"
+    (compute_centrality, dashboards) keep working unchanged.
+    """
+    relation_type = relation.relation_type.value
+    new_evidence = {
+        "confidence": relation.confidence,
+        "source_doc_id": relation.source_doc_id,
+        "source_text": relation.source_text,
+    }
+
+    existing_key = _find_existing_edge_key(graph, source, target, relation_type)
+    if existing_key is not None:
+        edge_data = graph[source][target][existing_key]
+        edge_data["evidence"].append(new_evidence)
+        edge_data["confidence"] = max(e["confidence"] for e in edge_data["evidence"])
+        return existing_key
+
+    return graph.add_edge(
+        source, target,
+        relation_type=relation_type,
+        confidence=relation.confidence,
+        evidence=[new_evidence],
+    )
+
+
 def add_relation_edge(graph: "nx.MultiDiGraph", relation: ClassifiedRelation,
                        mention_to_resolved: dict) -> Optional[str]:
     """Add one ClassifiedRelation to graph as a directed edge between
-    the RESOLVED entities its two mention IDs belong to.
+    the RESOLVED entities its two mention IDs belong to, merging into
+    an existing same-type edge if one already exists for this pair
+    (see _merge_or_add_edge).
 
-    This is where the mention-ID -> resolved-ID translation described
-    in this module's docstring actually happens.
-
-    Skips (returns None, doesn't raise) in three cases — each expected/
-    recoverable during real batch processing, not a reason to halt:
-        1. relation.relation_type is UNRELATED — meaningful during
-           development/debugging, but not a graph edge.
-        2. Either entity ID isn't in mention_to_resolved — the relation
-           references a mention resolution.py never saw (a real
-           integration bug if it happens, but every other valid
-           relation should still get added).
-        3. The edge would be a self-loop (both mention IDs resolve to
-           the same entity) — can legitimately happen when two mentions
-           resolution merged together are also the pair a relation was
-           classified between.
-
-    Args:
-        graph: the MultiDiGraph to mutate.
-        relation: the ClassifiedRelation to add.
-        mention_to_resolved: output of
-            nlp.resolution.build_mention_to_resolved_map.
+    Skips (returns None) in three expected/recoverable cases:
+        1. relation.relation_type is UNRELATED.
+        2. Either entity ID isn't in mention_to_resolved (the relation
+           references a mention resolution.py never saw).
+        3. The edge would be a self-loop (both mention IDs resolved to
+           the same entity).
 
     Returns:
-        The edge key (as assigned by nx.MultiDiGraph.add_edge) if an
-        edge was added, or None if skipped for one of the reasons above.
+        The edge key if an edge was added or merged into, or None if skipped.
     """
     if relation.relation_type == RelationType.UNRELATED:
         return None
@@ -148,40 +153,13 @@ def add_relation_edge(graph: "nx.MultiDiGraph", relation: ClassifiedRelation,
     if resolved_a == resolved_b:
         return None
 
-    edge_key = graph.add_edge(
-        resolved_a, resolved_b,
-        relation_type=relation.relation_type.value,
-        confidence=relation.confidence,
-        source_doc_id=relation.source_doc_id,
-        source_text=relation.source_text,
-    )
-    return edge_key
+    return _merge_or_add_edge(graph, resolved_a, resolved_b, relation)
 
 
 def get_evidence_trail(graph: "nx.MultiDiGraph", node_id: str) -> dict:
     """Retrieve everything needed to explain why a node/its edges
-    exist, tracing back to source documents — the explainability
-    requirement for this project ("can every flagged key influencer or
-    suspicious pattern be traced back to source evidence?").
-
-    A thin read-only query over attributes already stored on the graph
-    at build time (mention_ids, source_doc_ids on nodes; source_doc_id,
-    source_text on edges), rather than a separate evidence-tracking
-    system — everything needed already lives on the graph by construction.
-
-    Args:
-        graph: a graph produced by build_graph.
-        node_id: a ResolvedEntity.id present in graph.
-
-    Returns:
-        dict with keys:
-            node_attributes: the full attribute dict stored on this
-                node (entity_type, canonical_text, mention_ids,
-                source_doc_ids, is_low_confidence_cross_merge).
-            incoming_edges / outgoing_edges: lists of
-                {neighbor_id, relation_type, confidence, source_doc_id,
-                source_text} for every edge touching this node, split
-                by direction since relation_type is directional.
+    exist, tracing back to source documents — every edge's full
+    evidence list (all supporting documents/confidences), not just one.
 
     Raises:
         KeyError: if node_id is not present in graph.
@@ -194,8 +172,7 @@ def get_evidence_trail(graph: "nx.MultiDiGraph", node_id: str) -> dict:
             "neighbor_id": target,
             "relation_type": data["relation_type"],
             "confidence": data["confidence"],
-            "source_doc_id": data["source_doc_id"],
-            "source_text": data["source_text"],
+            "evidence": data["evidence"],
         }
         for _, target, data in graph.out_edges(node_id, data=True)
     ]
@@ -204,8 +181,7 @@ def get_evidence_trail(graph: "nx.MultiDiGraph", node_id: str) -> dict:
             "neighbor_id": source,
             "relation_type": data["relation_type"],
             "confidence": data["confidence"],
-            "source_doc_id": data["source_doc_id"],
-            "source_text": data["source_text"],
+            "evidence": data["evidence"],
         }
         for source, _, data in graph.in_edges(node_id, data=True)
     ]
@@ -217,19 +193,10 @@ def get_evidence_trail(graph: "nx.MultiDiGraph", node_id: str) -> dict:
     }
 
 
-# NetworkX's betweenness_centrality/pagerank don't accept a MultiDiGraph
-# directly for every algorithm/version combination, and parallel edges
-# (two distinct relation types between the same pair) would double-count
-# a connection's structural importance if left in for centrality
-# purposes specifically. Both functions below collapse to a plain
-# DiGraph first — this only affects the centrality calculation, not the
-# graph object itself, which keeps every parallel edge for evidence
-# purposes (see get_evidence_trail above).
 def _as_simple_digraph(graph: "nx.MultiDiGraph") -> "nx.DiGraph":
-    """Collapse a MultiDiGraph to a plain DiGraph (parallel edges
-    merged into one) for centrality algorithms that don't operate on
-    multigraphs. Node/edge attributes are not preserved on the
-    collapsed view — only used internally for structural centrality math.
+    """Collapse to a plain DiGraph for centrality algorithms that
+    don't operate on multigraphs. Attributes aren't preserved — used
+    internally for structural centrality math only.
     """
     simple = nx.DiGraph()
     simple.add_nodes_from(graph.nodes())
@@ -239,13 +206,6 @@ def _as_simple_digraph(graph: "nx.MultiDiGraph") -> "nx.DiGraph":
 
 def compute_centrality(graph: "nx.MultiDiGraph", method: str = "betweenness") -> dict:
     """Run a centrality algorithm over the graph.
-
-    Args:
-        graph: a graph produced by build_graph.
-        method: "betweenness" or "pagerank".
-
-    Returns:
-        dict mapping node_id -> centrality score (float).
 
     Raises:
         ValueError: if method is not one of the supported options.
@@ -259,17 +219,8 @@ def compute_centrality(graph: "nx.MultiDiGraph", method: str = "betweenness") ->
 
 
 def highlight_influencer(graph: "nx.MultiDiGraph", method: str = "betweenness") -> Optional[dict]:
-    """Identify the single highest-centrality node and attach a stated
-    reason — this is what makes the flag explainable rather than a bare
-    score with no justification.
-
-    Args:
-        graph: a graph produced by build_graph.
-        method: which centrality method to rank by (see compute_centrality).
-
-    Returns:
-        dict with node_id, score, method, and a human-readable reason,
-        or None if the graph has no nodes.
+    """Identify the single highest-centrality node with a stated
+    reason, or None if the graph has no nodes.
     """
     if graph.number_of_nodes() == 0:
         return None
@@ -284,20 +235,9 @@ def highlight_influencer(graph: "nx.MultiDiGraph", method: str = "betweenness") 
 
 
 def render_graph(graph: "nx.MultiDiGraph", output_path: str = "graph.png") -> str:
-    """Render a static image of the graph for offline viewing/demo use.
-
-    This is an interim, non-interactive visualization only. The full
-    interactive experience (click/hover/zoom/pan/filter/expand-collapse)
-    lives in dashboard/'s GraphCanvas component, not here — this
-    function exists for quick local sanity-checking of a graph's shape,
-    not as a dashboard substitute.
-
-    Args:
-        graph: a graph produced by build_graph.
-        output_path: where to save the rendered PNG.
-
-    Returns:
-        The output_path, for convenience chaining.
+    """Render a static PNG for quick local sanity-checking. Not a
+    dashboard substitute — the interactive experience lives in
+    dashboard/'s GraphCanvas component.
 
     Raises:
         RuntimeError: if matplotlib is not installed.
@@ -327,7 +267,6 @@ def render_graph(graph: "nx.MultiDiGraph", output_path: str = "graph.png") -> st
     return output_path
 
 
-# Node fill colors by entity_type, for render_graph only.
 _ENTITY_TYPE_COLORS = {
     "PERSON": "#4f8ef7",
     "LOCATION": "#f7b84f",
@@ -338,13 +277,9 @@ _ENTITY_TYPE_COLORS = {
 
 
 if __name__ == "__main__":
-    # Minimal smoke test for the Sep demo — not a substitute for tests/.
-    # Chains all four pipeline stages built so far: extraction ->
-    # resolution -> relation classification -> graph construction.
-    # NOTE: this requires transformers + torch installed for the
-    # relation-classification step (nlp.relation_classification) — see
-    # that module's docstring. If torch is unavailable, this smoke test
-    # cannot run past the classify_all_relations call.
+    # Smoke test chaining extraction -> resolution -> relation
+    # classification -> graph construction. Requires transformers +
+    # torch for the relation-classification step.
     from nlp.extraction import load_synthetic_fir, extract_entities
     from nlp.resolution import resolve_entities
 
@@ -384,13 +319,13 @@ if __name__ == "__main__":
             print(f"  [{attrs['entity_type']}] {attrs['canonical_text']!r} "
                   f"(docs={attrs['source_doc_ids']})")
         for u, v, data in graph.edges(data=True):
+            doc_count = len(data["evidence"])
             print(f"  {u} --[{data['relation_type']}]--> {v} "
-                  f"(conf={data['confidence']:.2f})")
+                  f"(confidence={data['confidence']:.2f}, "
+                  f"confirmed across {doc_count} document{'s' if doc_count != 1 else ''})")
 
     except RuntimeError as e:
-        print(f"\n(Skipping relation-classification/graph portion — "
-              f"{e})")
-        print("Building graph with entities only, no edges, to at least "
-              "demonstrate node construction:")
+        print(f"\n(Skipping relation-classification/graph portion — {e})")
+        print("Building graph with entities only, no edges:")
         graph = build_graph(resolved, [])
         print(f"  {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")

@@ -3,14 +3,18 @@ scripts/populate_demo_case.py
 
 Bridges data/generate_synthetic.py (which only builds in-memory
 SyntheticDocument objects) to the actual database: creates a new Case,
-assigns it to an investigator, and ingests generated synthetic
-documents into it — so the case shows up in the dashboard's dropdown
-with real content already inside.
+assigns it to an investigator, and runs each generated synthetic
+document through the SAME pipeline api/routes/ingestion.py uses
+(extraction -> persist entities -> relation classification -> persist
+relationships) — not just a bare document insert.
 
-This exists because generate_synthetic.py's own __main__ block only
-prints documents to the terminal; it never touches the database. This
-script is the missing link between "I generated synthetic data" and
-"I can see a case in the dashboard."
+An earlier version of this script only called repo.create_document,
+which stores the raw document text but never derives or persists any
+entities/relationships from it. That made a freshly seeded case show
+up in the dashboard's dropdown but return 501 from /query/{case_id}
+("no persisted entities/relationships to build a graph from") —
+looking populated while actually being empty. This version mirrors
+ingestion.py's real behavior so a seeded case is immediately queryable.
 
 Usage:
     python -m scripts.populate_demo_case
@@ -24,6 +28,8 @@ import uuid
 from db.connection import SessionLocal, init_db
 from db import repository as repo
 from data.generate_synthetic import generate_dataset, DocumentType
+import nlp.extraction as extraction
+import nlp.relation_classification as relation_classification
 from schema.case import Case
 from schema.entities import SourceDocument
 
@@ -37,10 +43,107 @@ _DOC_TYPE_MAP = {
 }
 
 
+def _render_structured_as_text(synth_doc) -> str:
+    """Render a CDR/financial SyntheticDocument's structured data as a
+    natural-language sentence for extraction to run on.
+
+    Feeding str(synth_doc.structured) (a raw Python dict/list repr)
+    straight to extraction was a real bug: dict/list syntax contains
+    many phone-number-shaped and digit-shaped substrings that spaCy/
+    regex misread as extra phantom entities, which then blew up
+    classify_all_relations's O(n^2) pairwise calls into dozens of
+    spurious relationship rows for a single document (observed: 45
+    relationship inserts from one CDR, enough to time out the DB
+    connection mid-transaction). Rendering to plain, minimal prose
+    instead means extraction only finds the entities actually present.
+    """
+    if synth_doc.text:
+        return synth_doc.text
+
+    structured = synth_doc.structured
+
+    if "calls" in structured:
+        calls = structured["calls"]
+        if not calls:
+            return "No calls recorded."
+        first = calls[0]
+        return (
+            f"Call detail record: {first['caller']} called {first['callee']} "
+            f"{len(calls)} time(s), starting {first['timestamp']}."
+        )
+
+    if "transactions" in structured:
+        transactions = structured["transactions"]
+        if not transactions:
+            return "No transactions recorded."
+        total = sum(t["amount"] for t in transactions)
+        return (
+            f"Financial record: account {structured['sender_account']} sent "
+            f"{len(transactions)} transaction(s) totaling {total} to account "
+            f"{structured['receiver_account']}."
+        )
+
+    return "No content recorded."
+
+
+def _ingest_one_document(db, document: SourceDocument) -> dict:
+    """Run one document through the same pipeline api/routes/ingestion.py
+    uses: persist the document, extract entities, persist them, then
+    (if possible) classify relations and persist those too. Degrades
+    gracefully — same pattern as ingestion.py — if spaCy or
+    transformers/torch aren't installed, rather than failing the whole
+    seed run over one missing optional dependency.
+
+    Returns a small summary dict for progress printing.
+    """
+    repo.create_document(db, document)
+
+    try:
+        entities = extraction.extract_entities(document.raw_text, document.id)
+    except RuntimeError as exc:
+        return {
+            "document_id": document.id,
+            "status": "stored_pending_extraction",
+            "detail": str(exc),
+            "entity_count": 0,
+            "relation_count": 0,
+        }
+
+    repo.create_entities(db, entities)
+
+    relation_count = 0
+    relation_detail = None
+    # Safety cap: classify_all_relations is O(n^2) in entity count per
+    # document. A document with an unexpectedly large entity count
+    # (e.g. from a rendering bug, or just a very dense real document)
+    # could otherwise produce a huge relationship batch in one insert —
+    # this is what caused the SSL/connection-timeout crash this
+    # function was patched to avoid. 12 entities -> up to 66 pairs is a
+    # reasonable ceiling for a single synthetic document; tune upward
+    # if real documents are legitimately denser than this.
+    _MAX_ENTITIES_FOR_RELATION_CLASSIFICATION = 12
+    if 2 <= len(entities) <= _MAX_ENTITIES_FOR_RELATION_CLASSIFICATION:
+        try:
+            relations = relation_classification.classify_all_relations(entities, document.raw_text)
+            repo.create_relationships(db, relations)
+            relation_count = len(relations)
+        except RuntimeError as exc:
+            relation_detail = str(exc)
+
+    return {
+        "document_id": document.id,
+        "status": "extracted",
+        "entity_count": len(entities),
+        "relation_count": relation_count,
+        "detail": relation_detail,
+    }
+
+
 def populate(title: str, num_firs: int, num_cdrs: int, num_financial: int,
              investigator_badge_id: str) -> str:
-    """Generate a synthetic dataset, create a case for it, ingest every
-    document, and assign the given investigator to the case.
+    """Generate a synthetic dataset, create a case for it, run every
+    document through the real ingestion pipeline, and assign the given
+    investigator to the case.
 
     Returns:
         The new case's ID.
@@ -72,14 +175,18 @@ def populate(title: str, num_firs: int, num_cdrs: int, num_financial: int,
             num_firs=num_firs, num_cdrs=num_cdrs, num_financial=num_financial,
         )
 
+        total_entities = 0
+        total_relations = 0
+        extraction_unavailable = False
+        relation_unavailable = False
+
         for synth_doc in dataset:
             # FIRs carry their content in .text; CDR/financial records
-            # carry it in .structured (see generate_synthetic.py) —
-            # SourceDocument.raw_text needs a plain string either way,
-            # so structured docs get a str() fallback rather than an
-            # empty raw_text (which schema.entities.SourceDocument
-            # rejects on validation).
-            raw_text = synth_doc.text if synth_doc.text else str(synth_doc.structured)
+            # carry it in .structured. See _render_structured_as_text
+            # for why this can't just be str(synth_doc.structured) —
+            # that fed dict/list repr syntax to extraction and produced
+            # dozens of spurious phantom entities.
+            raw_text = _render_structured_as_text(synth_doc)
 
             document = SourceDocument(
                 id=synth_doc.doc_id,
@@ -87,15 +194,41 @@ def populate(title: str, num_firs: int, num_cdrs: int, num_financial: int,
                 raw_text=raw_text,
                 case_id=created_case.id,
             )
-            repo.create_document(db, document)
+            result = _ingest_one_document(db, document)
+
+            total_entities += result["entity_count"]
+            total_relations += result["relation_count"]
+            if result["status"] == "stored_pending_extraction":
+                extraction_unavailable = True
+            if result.get("detail") and result["status"] == "extracted":
+                relation_unavailable = True
 
         print(f"Created case {created_case.id!r} ({title!r}) in agency "
               f"{investigator.agency_id!r}, assigned to {investigator.name} "
               f"({investigator_badge_id}).")
         print(f"Ingested {len(dataset)} synthetic documents "
               f"({num_firs} FIR, {num_cdrs} CDR, {num_financial} financial).")
-        print("Log in as that investigator and the case should now appear "
-              "in the dashboard's case dropdown.")
+        print(f"Extracted {total_entities} entities, "
+              f"{total_relations} relations across all documents.")
+
+        if extraction_unavailable:
+            print("WARNING: spaCy (or its model) was unavailable for at least "
+                  "one document — some documents were stored but not extracted. "
+                  "Run: python -m spacy download en_core_web_sm")
+        if relation_unavailable:
+            print("NOTE: relation classification was unavailable for at least "
+                  "one document (transformers/torch not installed) — entities "
+                  "were extracted but some relationship edges are missing. "
+                  "Run: pip install transformers torch")
+
+        if total_entities > 0:
+            print(f"Log in as {investigator.name} ({investigator_badge_id}) — "
+                  f"the case should now appear in the dashboard with a real, "
+                  f"queryable graph (not just an entry in the dropdown).")
+        else:
+            print("WARNING: zero entities were extracted from any document — "
+                  "this case will still show 501/empty when queried. Check "
+                  "that spaCy and en_core_web_sm are installed.")
 
         return created_case.id
     finally:
@@ -104,7 +237,7 @@ def populate(title: str, num_firs: int, num_cdrs: int, num_financial: int,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate synthetic data and populate a real case with it."
+        description="Generate synthetic data and populate a real, queryable case with it."
     )
     parser.add_argument("--title", default="Synthetic demo case",
                          help="Title for the new case.")

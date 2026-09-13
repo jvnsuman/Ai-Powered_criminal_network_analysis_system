@@ -42,6 +42,32 @@ _RELATION_HYPOTHESES = {
     RelationType.UNRELATED: "{a} and {b} are not mentioned as related",
 }
 
+# ASSOCIATED_WITH is deliberately excluded from the main competition
+# below (see _SPECIFIC_RELATION_TYPES). In NLI zero-shot classification,
+# broader/easier-to-satisfy hypotheses ("is associated with") reliably
+# outscore more specific ones ("called by phone") even when the specific
+# one is the objectively correct reading of the source text — e.g. real
+# diagnostic runs on this project's own sample data ("...contacted from
+# phone number...") scored "is associated with" at 0.49 and "called or
+# contacted by phone" at only 0.334, despite the text explicitly
+# describing a phone contact. Treating ASSOCIATED_WITH as a peer
+# hypothesis lets it silently absorb cases that should have been a
+# specific, more evidentially useful relation type. Instead, it's only
+# assigned as an explicit fallback (see classify_relation) when no
+# specific relation type clears the confidence threshold on its own.
+_SPECIFIC_RELATION_TYPES = [
+    t for t in RelationType
+    if t not in (RelationType.UNRELATED, RelationType.ASSOCIATED_WITH)
+]
+
+# Once no specific relation clears confidence_threshold, ASSOCIATED_WITH
+# is checked on its own against this lower bar before falling all the
+# way to UNRELATED — a low-confidence "these two are connected somehow"
+# fallback is more useful to an investigator than nothing at all, but
+# it should not be treated as equally certain as a specific relation
+# that cleared the main threshold.
+_ASSOCIATED_WITH_FALLBACK_THRESHOLD = 0.3
+
 
 @dataclass
 class ClassifiedRelation:
@@ -107,22 +133,45 @@ def _get_relation_pipeline():
     return _relation_pipeline
 
 
+def _classify_single(classifier, source_text: str, hypothesis_to_type: dict) -> tuple[str, float]:
+    """Run the classifier over one set of hypotheses and return the
+    top (hypothesis, score) pair.
+    """
+    hypotheses = list(hypothesis_to_type.keys())
+    result = classifier(source_text, hypotheses)
+    return result["labels"][0], result["scores"][0]
+
+
 def classify_relation(entity_a: ExtractedEntity, entity_b: ExtractedEntity,
                        source_text: str,
                        confidence_threshold: float = 0.3) -> ClassifiedRelation:
     """Classify the relationship between two extracted entities.
 
-    Returns UNRELATED if no label clears confidence_threshold.
+    Two-pass strategy:
+      1. Compete only the SPECIFIC relation types (CALLS, PRESENT_AT,
+         OWNS, TRANSACTS_WITH) against each other. If the winner clears
+         confidence_threshold, use it.
+      2. Otherwise, check ASSOCIATED_WITH on its own against a lower
+         bar (_ASSOCIATED_WITH_FALLBACK_THRESHOLD). If it clears that,
+         use it as a low-confidence fallback.
+      3. Otherwise, UNRELATED.
+
+    ASSOCIATED_WITH is deliberately never compared head-to-head with
+    the specific types — see the module-level comment on
+    _SPECIFIC_RELATION_TYPES for why (it systematically outscores
+    specific, more evidentially useful labels in NLI zero-shot
+    classification regardless of which one actually matches the text).
 
     NOTE on confidence_threshold=0.3 (lowered from an original 0.5):
-    zero-shot classification across 5-6 competing relation hypotheses
+    zero-shot classification across several competing hypotheses
     rarely produces a top score above 0.5 even for the genuinely
     correct label — real diagnostic runs on this project's own sample
-    data showed correct top-scoring relations clustering at 0.41-0.48,
-    which the old 0.5 cutoff silently discarded as UNRELATED on every
-    single relation. 0.3 is a starting point (comfortably above the
-    ~0.17 a uniform 6-way random guess would average), not a validated
-    cutoff — tune against labelled data before December.
+    data showed correct top-scoring relations clustering at 0.41-0.48
+    even before ASSOCIATED_WITH was split out, which the old 0.5
+    cutoff silently discarded as UNRELATED on every single relation.
+    0.3 is a starting point (comfortably above the ~0.2 a uniform
+    4-5-way random guess would average), not a validated cutoff — tune
+    against labelled data before December.
 
     Raises:
         RuntimeError: if transformers/torch are not installed, or two
@@ -131,43 +180,55 @@ def classify_relation(entity_a: ExtractedEntity, entity_b: ExtractedEntity,
     """
     classifier = _get_relation_pipeline()
 
-    candidate_types = [t for t in RelationType if t != RelationType.UNRELATED]
-    hypothesis_to_type = {
+    specific_hypothesis_to_type = {
         _RELATION_HYPOTHESES[t].format(a=entity_a.text, b=entity_b.text): t
-        for t in candidate_types
+        for t in _SPECIFIC_RELATION_TYPES
     }
-    hypotheses = list(hypothesis_to_type.keys())
-
-    if len(hypotheses) != len(candidate_types):
+    if len(specific_hypothesis_to_type) != len(_SPECIFIC_RELATION_TYPES):
         raise RuntimeError(
             f"Hypothesis collision detected for entities "
             f"{entity_a.text!r}/{entity_b.text!r} — two RelationType "
             f"templates produced identical text."
         )
 
-    result = classifier(source_text, hypotheses)
+    top_hypothesis, top_score = _classify_single(classifier, source_text, specific_hypothesis_to_type)
 
-    top_hypothesis = result["labels"][0]
-    top_score = result["scores"][0]
-
-    if top_score < confidence_threshold:
+    if top_score >= confidence_threshold:
         return ClassifiedRelation(
             id=f"rel-{uuid.uuid4().hex[:12]}",
             entity_a_id=entity_a.id,
             entity_b_id=entity_b.id,
-            relation_type=RelationType.UNRELATED,
+            relation_type=specific_hypothesis_to_type[top_hypothesis],
             confidence=top_score,
             source_doc_id=entity_a.source_doc_id,
             source_text=source_text,
         )
 
-    winning_type = hypothesis_to_type[top_hypothesis]
+    # No specific relation cleared the bar — check ASSOCIATED_WITH on
+    # its own as a fallback, at a lower threshold, rather than letting
+    # it compete directly against the specific types above.
+    associated_hypothesis = _RELATION_HYPOTHESES[RelationType.ASSOCIATED_WITH].format(
+        a=entity_a.text, b=entity_b.text
+    )
+    associated_result = classifier(source_text, [associated_hypothesis])
+    associated_score = associated_result["scores"][0]
+
+    if associated_score >= _ASSOCIATED_WITH_FALLBACK_THRESHOLD:
+        return ClassifiedRelation(
+            id=f"rel-{uuid.uuid4().hex[:12]}",
+            entity_a_id=entity_a.id,
+            entity_b_id=entity_b.id,
+            relation_type=RelationType.ASSOCIATED_WITH,
+            confidence=associated_score,
+            source_doc_id=entity_a.source_doc_id,
+            source_text=source_text,
+        )
 
     return ClassifiedRelation(
         id=f"rel-{uuid.uuid4().hex[:12]}",
         entity_a_id=entity_a.id,
         entity_b_id=entity_b.id,
-        relation_type=winning_type,
+        relation_type=RelationType.UNRELATED,
         confidence=top_score,
         source_doc_id=entity_a.source_doc_id,
         source_text=source_text,
@@ -178,10 +239,10 @@ def classify_all_relations(entities: list[ExtractedEntity], source_text: str,
                             confidence_threshold: float = 0.3,
                             skip_unrelated: bool = True) -> list[ClassifiedRelation]:
     """Classify relationships across every pair of entities from the
-    same document. O(n^2) pipeline calls.
-
-    See classify_relation's docstring for why confidence_threshold
-    defaults to 0.3 rather than 0.5.
+    same document. O(n^2) pipeline calls (now up to 2x per pair, since
+    a pair that doesn't clear the specific-type threshold triggers a
+    second classifier call to check ASSOCIATED_WITH as a fallback —
+    see classify_relation).
 
     Raises:
         RuntimeError: if transformers/torch are not installed.
