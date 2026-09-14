@@ -155,6 +155,17 @@ export const api = {
     return request('/ingest/', { method: 'POST', body: document })
   },
 
+  /**
+   * Fetch per-document-type ingestion counts for a case (see
+   * dashboard/src/pages/DataSources.jsx and
+   * api/routes/ingestion.py's GET /{case_id}/summary, backed by
+   * db.repository.get_document_summary_for_case). Returns
+   * { sources: [{ document_type, count, last_updated }] }.
+   */
+  getDocumentSummary(caseId) {
+    return request(`/ingest/${encodeURIComponent(caseId)}/summary`)
+  },
+
   /** List every case the logged-in user is authorized to see. */
   listCases() {
     return request('/cases/')
