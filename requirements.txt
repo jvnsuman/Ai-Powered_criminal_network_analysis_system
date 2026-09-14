@@ -13,8 +13,7 @@
 # NER engine for PERSON/LOCATION/ORGANIZATION.
 # -----------------------------------------------------------------------
 spacy>=3.7,<3.8
-# After installing, run: python -m spacy download en_core_web_sm
-
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 # -----------------------------------------------------------------------
 # Stage 3 — Entity resolution (nlp/resolution.py, nlp/confidence.py)
 # Currently fuzzy string matching only (RapidFuzz). scikit-learn is
@@ -22,6 +21,7 @@ spacy>=3.7,<3.8
 # -----------------------------------------------------------------------
 rapidfuzz>=3.9,<4.0
 scikit-learn>=1.5,<2.0
+numpy>=1.24,<2.0
 
 # -----------------------------------------------------------------------
 # Stage 3.5 — Relation classification & risk flagging
