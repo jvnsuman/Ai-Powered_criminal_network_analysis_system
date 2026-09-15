@@ -208,6 +208,16 @@ export const api = {
   },
 
   /**
+   * List previously generated reports for a case, metadata only (see
+   * dashboard/src/pages/Reports.jsx and api/routes/reports.py's
+   * GET /{case_id}). Returns { reports: [{ id, title, format,
+   * created_at, ... }] }.
+   */
+  listReports(caseId) {
+    return request(`/reports/${encodeURIComponent(caseId)}`)
+  },
+
+  /**
    * Download a previously-generated report file. `report` is the
    * report object as listed in Reports.jsx — must carry an `id`,
    * which is used to build the download URL per
@@ -223,6 +233,15 @@ export const api = {
         filename: report?.filename || report?.name || `report-${report?.id || 'download'}`,
       }
     )
+  },
+
+  /**
+   * Fetch the current user's stored preferences (see
+   * dashboard/src/pages/Settings.jsx and api/routes/settings.py's
+   * GET /). Returns { preferences: {...} }.
+   */
+  getSettings() {
+    return request('/settings/')
   },
 
   /**

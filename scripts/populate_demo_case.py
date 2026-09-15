@@ -193,6 +193,13 @@ def populate(title: str, num_firs: int, num_cdrs: int, num_financial: int,
                 document_type=_DOC_TYPE_MAP[synth_doc.doc_type],
                 raw_text=raw_text,
                 case_id=created_case.id,
+                # CDR/financial docs carry their real detection-relevant
+                # data (call timestamps, transaction amounts) here, not
+                # in raw_text — see schema.entities.SourceDocument's
+                # docstring. Without this, detect_anomalies's
+                # structuring/burst checks silently have nothing to
+                # scan even for seeded demo data.
+                structured=synth_doc.structured or {},
             )
             result = _ingest_one_document(db, document)
 

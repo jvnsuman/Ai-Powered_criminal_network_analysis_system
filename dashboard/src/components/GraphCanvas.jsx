@@ -30,6 +30,20 @@ import { Maximize2, Network as NetworkIcon, ZoomIn, ZoomOut } from 'lucide-react
 import { useEffect, useRef, useState } from 'react'
 import cytoscape from 'cytoscape'
 
+// Silences two cytoscape-internal dev warnings that show up on every
+// graph render, neither of which reflects an actual problem here:
+//   - "custom wheel sensitivity": we deliberately set wheelSensitivity
+//     below (for a tuned zoom feel) — cytoscape warns on ANY non-default
+//     value, so this fires no matter what it's set to.
+//   - "The style value of `label` is deprecated for `width`": used on
+//     the `.expander` ("+N more") node to auto-size it to its label
+//     text. Still fully functional; the only "modern" replacement
+//     requires manually measuring rendered text width via a canvas
+//     context, which isn't worth it for this cosmetic sizing detail.
+// Doesn't affect rendering/interaction — only cytoscape's own console
+// logging.
+cytoscape.warnings(false)
+
 // Nodes with more hidden neighbors than this get collapsed behind a
 // single "+N more" expander node on initial render.
 const COLLAPSE_THRESHOLD = 4

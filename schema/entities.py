@@ -200,13 +200,25 @@ class SourceDocument:
     Every Entity and Relationship should be traceable back to one of
     these — this is what makes the evidence-trail / explainability
     layer (graph/explainability.py) possible.
+
+    structured carries the machine-readable shape of a CDR/financial
+    record (a "calls" list or "transactions" list — see
+    data/generate_synthetic.py's SyntheticDocument for the exact
+    field names expected) alongside raw_text. It's optional and
+    defaults to empty because FIR/surveillance/social/criminal_history/
+    intel documents are free text with no structured equivalent.
+    graph.analytics.detect_anomalies's financial-structuring and
+    communication-burst checks read this field directly — without it,
+    those two checks silently no-op (see api/routes/alerts.py's
+    docstring for the gap this closes).
     """
 
     id: str
     document_type: str  # one of VALID_DOCUMENT_TYPES
     raw_text: str
     case_id: Optional[str] = None
-    created_at: Optional[str] = None  # server-assigned at persistence time (db.models.SourceDocumentORM's default) — not required on input
+    structured: dict = field(default_factory=dict)
+    created_at: Optional[str] = None
 
     def __post_init__(self):
         """Validate on construction."""
@@ -227,6 +239,7 @@ class SourceDocument:
             "document_type": self.document_type,
             "raw_text": self.raw_text,
             "case_id": self.case_id,
+            "structured": self.structured,
             "created_at": self.created_at,
         }
 
@@ -234,10 +247,7 @@ class SourceDocument:
     def from_dict(cls, data: dict) -> "SourceDocument":
         """Build and validate a SourceDocument from a plain dict. This
         is the shape check api/routes/ingestion.py relies on before
-        accepting an uploaded document. created_at is normally left
-        unset here (the caller is submitting a new document) and
-        assigned server-side at persistence time — accepted as an
-        optional passthrough only for round-tripping already-stored data.
+        accepting an uploaded document.
         """
         try:
             return cls(
@@ -245,7 +255,7 @@ class SourceDocument:
                 document_type=data["document_type"],
                 raw_text=data["raw_text"],
                 case_id=data.get("case_id"),
-                created_at=data.get("created_at"),
+                structured=data.get("structured", {}),
             )
         except KeyError as exc:
             raise ValueError(f"SourceDocument dict missing required key: {exc}")

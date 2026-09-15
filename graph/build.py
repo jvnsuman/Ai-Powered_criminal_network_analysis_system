@@ -101,6 +101,11 @@ def _merge_or_add_edge(graph: "nx.MultiDiGraph", source: str, target: str,
     document that supports it — plus a top-level "confidence" equal to
     the max across all evidence, so existing readers of "confidence"
     (compute_centrality, dashboards) keep working unchanged.
+
+    Also mirrors the first evidence entry's source_doc_id/source_text
+    directly onto the edge itself (not just inside "evidence"), so
+    get_evidence_trail can read them without reaching into the
+    evidence list — kept in sync on every merge, not just at creation.
     """
     relation_type = relation.relation_type.value
     new_evidence = {
@@ -114,12 +119,18 @@ def _merge_or_add_edge(graph: "nx.MultiDiGraph", source: str, target: str,
         edge_data = graph[source][target][existing_key]
         edge_data["evidence"].append(new_evidence)
         edge_data["confidence"] = max(e["confidence"] for e in edge_data["evidence"])
+        # Keep top-level source_doc_id/source_text in sync with the
+        # first evidence entry after every merge.
+        edge_data["source_doc_id"] = edge_data["evidence"][0]["source_doc_id"]
+        edge_data["source_text"] = edge_data["evidence"][0]["source_text"]
         return existing_key
 
     return graph.add_edge(
         source, target,
         relation_type=relation_type,
         confidence=relation.confidence,
+        source_doc_id=relation.source_doc_id,
+        source_text=relation.source_text,
         evidence=[new_evidence],
     )
 
@@ -172,6 +183,8 @@ def get_evidence_trail(graph: "nx.MultiDiGraph", node_id: str) -> dict:
             "neighbor_id": target,
             "relation_type": data["relation_type"],
             "confidence": data["confidence"],
+            "source_doc_id": data.get("source_doc_id"),
+            "source_text": data.get("source_text"),
             "evidence": data["evidence"],
         }
         for _, target, data in graph.out_edges(node_id, data=True)
@@ -181,6 +194,8 @@ def get_evidence_trail(graph: "nx.MultiDiGraph", node_id: str) -> dict:
             "neighbor_id": source,
             "relation_type": data["relation_type"],
             "confidence": data["confidence"],
+            "source_doc_id": data.get("source_doc_id"),
+            "source_text": data.get("source_text"),
             "evidence": data["evidence"],
         }
         for source, _, data in graph.in_edges(node_id, data=True)

@@ -95,6 +95,16 @@ class SourceDocumentORM(Base):
     raw_text = Column(String, nullable=False)
     case_id = Column(String, ForeignKey("cases.id"), nullable=True)
     created_at = Column(String, nullable=False, default=_utc_now_iso)  # backs db.repository.get_document_summary_for_case
+    # JSON-encoded dict of CDR/financial structured data ("calls" or
+    # "transactions" lists — see data/generate_synthetic.py's
+    # SyntheticDocument for the exact shape). Same encode-as-string
+    # pattern as UserORM.preferences. Null/empty for FIR/surveillance/
+    # etc documents, which have no structured equivalent. Feeds
+    # graph.analytics.detect_anomalies's financial-structuring and
+    # communication-burst checks (see api/routes/alerts.py's docstring
+    # for the gap this closes — those two checks previously only ever
+    # fired against synthetic documents, never real ingested ones).
+    structured = Column(String, nullable=True)
 
     case = relationship("CaseORM", back_populates="documents")
     entities = relationship("EntityORM", back_populates="source_document")

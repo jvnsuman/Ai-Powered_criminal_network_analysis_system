@@ -13,16 +13,17 @@ Relationship -> EntityORM/RelationshipORM) is now wired up in
 ingestion.py, so this runs detect_anomalies against a real,
 case-specific graph when one exists.
 
-Known remaining limitation: detect_anomalies's financial-structuring
-and communication-burst checks need documents shaped like
-data/generate_synthetic.py's SyntheticDocument (.doc_id + .structured
-fields) — real ingested documents (schema.entities.SourceDocument)
-only carry raw_text, with no structured extraction of amounts/
-timestamps. So only the graph-structural hub-and-spoke check runs
-against real case data today; the other two only ever fire against
-synthetic/demo documents. Passing real SourceDocuments to
-detect_anomalies as-is would silently no-op those two checks rather
-than error, which is safe but worth knowing if alerts look sparse.
+Financial-structuring / communication-burst checks (previously
+graph-structural-only): detect_anomalies's two document-based checks
+need documents shaped like data/generate_synthetic.py's
+SyntheticDocument (.doc_id + .structured fields). schema.entities.
+SourceDocument now carries the same .structured field (see that
+module's docstring), so real ingested CDR/financial documents can feed
+these checks too, not just synthetic ones — this route now fetches a
+case's real documents via db.repository.get_documents_for_case and
+passes them through. Documents with no structured data (FIRs,
+surveillance reports, etc.) simply contribute nothing to these two
+checks, same as before.
 
 Status: [DONE] — real code path, running for real once a case has
 persisted entities. Honest empty-state (not fabricated) when it doesn't.
@@ -84,9 +85,13 @@ def list_alerts(case_id: str, user: User = Depends(get_current_user), db: Sessio
         resolved_entities = resolve_entities(mentions)
         relations = repo.get_relationships_for_case(db, case_id)
         graph = graph_build.build_graph(resolved_entities, relations)
-        # No structured documents passed (see module docstring) — only
-        # the graph-structural hub-and-spoke check runs against real data.
-        findings = detect_anomalies(graph)
+        # Real documents now passed through — see module docstring.
+        # detect_anomalies duck-types on .doc_id/.structured, and
+        # schema.entities.SourceDocument has both (structured defaults
+        # to {}, so FIR/surveillance/etc documents simply contribute
+        # nothing to the two document-based checks below).
+        documents = repo.get_documents_for_case(db, case_id)
+        findings = detect_anomalies(graph, documents)
     else:
         findings = []
 

@@ -66,13 +66,20 @@ def _case_to_domain(row: CaseORM) -> Case:
 
 
 def _document_to_domain(row: SourceDocumentORM) -> SourceDocument:
-    """Convert a SourceDocumentORM row into a schema.entities.SourceDocument."""
+    """Convert a SourceDocumentORM row into a schema.entities.SourceDocument.
+
+    structured follows the same json.dumps/json.loads-as-string
+    pattern already used for UserORM.preferences above — decoded here,
+    defaulting to {} when the column is null (FIR/surveillance/etc
+    documents with no structured equivalent).
+    """
     return SourceDocument(
         id=row.id,
         document_type=row.document_type,
         raw_text=row.raw_text,
         case_id=row.case_id,
         created_at=row.created_at,
+        structured=json.loads(row.structured) if row.structured else {},
     )
 
 
@@ -210,12 +217,19 @@ def assign_investigator(db: Session, case_id: str, user_id: str) -> Optional[Cas
 def create_document(db: Session, document: SourceDocument) -> SourceDocument:
     """Insert a newly-ingested source document and return it as a
     domain dataclass.
+
+    structured is encoded via json.dumps — same pattern as
+    create_user's preferences handling above — and stored as None
+    (not an empty-object string) when the document has no structured
+    data, keeping the column consistent with preferences's null-vs-
+    empty convention.
     """
     row = SourceDocumentORM(
         id=document.id,
         document_type=document.document_type,
         raw_text=document.raw_text,
         case_id=document.case_id,
+        structured=json.dumps(document.structured) if document.structured else None,
     )
     db.add(row)
     db.commit()
@@ -230,6 +244,19 @@ def get_document(db: Session, document_id: str) -> Optional[SourceDocument]:
     """
     row = db.get(SourceDocumentORM, document_id)
     return _document_to_domain(row) if row else None
+
+
+def get_documents_for_case(db: Session, case_id: str) -> list[SourceDocument]:
+    """Every source document ingested under a case, as domain
+    dataclasses (with structured decoded) — the input
+    api/routes/alerts.py hands to graph.analytics.detect_anomalies
+    alongside that case's graph, so the financial-structuring and
+    communication-burst checks can run against real ingested CDR/
+    financial documents, not just synthetic ones (see that module's
+    docstring for the gap this closes).
+    """
+    rows = db.query(SourceDocumentORM).filter(SourceDocumentORM.case_id == case_id).all()
+    return [_document_to_domain(row) for row in rows]
 
 
 def get_document_summary_for_case(db: Session, case_id: str) -> list[dict]:
