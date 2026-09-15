@@ -25,6 +25,7 @@ import Sidebar from './components/Sidebar'
 import TopBar from './components/TopBar'
 import CaseSelector from './components/CaseSelector'
 import EvidencePanel from './components/EvidencePanel'
+import ErrorBoundary from './components/ErrorBoundary'
 import LoginForm from './components/LoginForm'
 import Dashboard from './pages/Dashboard'
 import NetworkGraph from './pages/NetworkGraph'
@@ -206,7 +207,11 @@ export default function App() {
           </div>
         )}
 
-        <main className="app-shell-v2-content">{renderPage()}</main>
+        <main className="app-shell-v2-content">
+          <ErrorBoundary resetKey={activePage} label={activePage}>
+            {renderPage()}
+          </ErrorBoundary>
+        </main>
 
         {activePage === 'dashboard' && selectedEntityId && (
           <div className="evidence-drawer">
